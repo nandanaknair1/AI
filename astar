@@ -59,7 +59,7 @@ def is_solvable(state):
 # ---------------- A* ----------------
 def astar(start, heuristic):
     pq = [(heuristic(start), 0, start, [])]
-    visited = {start}   # ✅ mark as visited immediately
+    visited = {start}  
     while pq:
         f, g, state, path = heapq.heappop(pq)
         print_board(state)
@@ -68,7 +68,7 @@ def astar(start, heuristic):
         for move in valid_moves(state.index(0)):
             nxt = apply_move(state, move)
             if nxt not in visited:
-                visited.add(nxt)   # ✅ prevent re-adding
+                visited.add(nxt)  
                 h = heuristic(nxt)
                 heapq.heappush(pq, (g + 1 + h, g + 1, nxt, path + [move]))
     return None
