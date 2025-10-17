@@ -55,7 +55,6 @@ def extract_vars(sentences):
 
 print("Enter KB sentences separated by commas.")
 print("Use words: and, or, not, implies, equivalent")
-print("Example: q implies p, p implies not q, q or r\n")
 
 kb_input = input("KB = ").strip()
 sentences = [s.strip() for s in kb_input.split(",")]
