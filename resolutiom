@@ -1,0 +1,114 @@
+# -------------------- FOL Resolution engine (supports variables) --------------------
+from itertools import combinations
+
+def is_variable(t):
+    """Variable check: lowercase first letter = variable"""
+    return t and t[0].islower()
+
+def parse_literal(s):
+    """Parse a literal like ~P(x,y) -> ('~P', ('x','y'))"""
+    s = s.strip()
+    neg = False
+    if s.startswith("~") or s.startswith("¬"):
+        neg = True
+        s = s[1:].strip()
+
+    if "(" not in s or ")" not in s:
+        # atomic literal like P with no args
+        pred, args = s, ()
+    else:
+        pred = s.split("(")[0].strip()
+        arg_str = s[s.index("(")+1:s.rindex(")")].strip()
+        args = tuple(a.strip() for a in arg_str.split(",")) if arg_str else ()
+
+    return (("~" + pred) if neg else pred, args)
+
+def comp(l):
+    """Complement of literal"""
+    pred, args = l
+    if pred.startswith("~"):
+        return (pred[1:], args)
+    return ("~" + pred, args)
+
+def unify(x, y, subs):
+    """Unify two argument lists (tuples)"""
+    if subs is None:
+        return None
+    if x == y:
+        return subs
+    if isinstance(x, tuple) and isinstance(y, tuple):
+        if len(x) != len(y):
+            return None
+        for xi, yi in zip(x, y):
+            subs = unify(xi, yi, subs)
+            if subs is None:
+                return None
+        return subs
+    if is_variable(x):
+        return unify_var(x, y, subs)
+    if is_variable(y):
+        return unify_var(y, x, subs)
+    return None
+
+def unify_var(var, x, subs):
+    """Helper: variable unification"""
+    if var in subs:
+        return unify(subs[var], x, subs)
+    if x in subs:
+        return unify(var, subs[x], subs)
+    new = subs.copy()
+    new[var] = x
+    return new
+
+def apply(l, subs):
+    """Apply substitution to a literal"""
+    pred, args = l
+    return (pred, tuple(subs.get(a, a) for a in args))
+
+def resolve(ci, cj):
+    """Resolution between two clauses"""
+    new = set()
+    for li in ci:
+        for lj in cj:
+            if li[0] == comp(lj)[0] and len(li[1]) == len(lj[1]):
+                subs = unify(li[1], lj[1], {})
+                if subs is not None:
+                    # merge and remove resolved literals
+                    merged = set(apply(l, subs) for l in (ci | cj) if l != li and l != lj)
+                    new.add(frozenset(merged))
+    return new
+
+def resolution_FOL(KB, query):
+    """Main resolution loop"""
+    # Parse all clauses
+    KB = [set(parse_literal(l) for l in clause) for clause in KB]
+    # Add negated query
+    KB.append({parse_literal("~" + query)})
+    KB = set(frozenset(c) for c in KB)
+
+    while True:
+        new = set()
+        for ci, cj in combinations(KB, 2):
+            resolvents = resolve(ci, cj)
+            if frozenset() in resolvents:
+                return True
+            new |= resolvents
+        if new.issubset(KB):
+            return False
+        KB |= new
+
+# ------------------- USER INPUT -------------------
+if __name__ == "__main__":
+    KB = []
+    n = int(input("How many clauses? "))
+    print("Enter each clause as comma separated literals, e.g.:  ~P(x),Q(x)")
+
+    for i in range(n):
+        clause = input(f"Clause {i+1}: ").strip()
+        if not clause:
+            continue
+        parts = [p.strip() for p in clause.split(",") if p.strip()]
+        KB.append(set(parts))
+
+    query = input("Enter query literal (ex: likes(john,peanuts)): ").strip()
+    print("\nRESULT =", resolution_FOL(KB, query))
