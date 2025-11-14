@@ -1,0 +1,460 @@
+#!/usr/bin/env python3
+import re
+import itertools
+import copy
+from collections import namedtuple
+
+# === AST node classes ===
+class Expr: pass
+
+class Pred(Expr):
+    def __init__(self, name, args):
+        self.name = name
+        self.args = args  # list of Expr (Variable, Function, Constant)
+    def __repr__(self): return f"{self.name}({', '.join(map(str,self.args))})"
+
+class Func(Expr):
+    def __init__(self, name, args):
+        self.name = name
+        self.args = args
+    def __repr__(self): return f"{self.name}({', '.join(map(str,self.args))})"
+
+class Var(Expr):
+    def __init__(self,name): self.name = name
+    def __repr__(self): return self.name
+
+class Const(Expr):
+    def __init__(self,name): self.name = name
+    def __repr__(self): return self.name
+
+class Not(Expr):
+    def __init__(self, p): self.p = p
+    def __repr__(self): return f"~{self.p}"
+
+class And(Expr):
+    def __init__(self, left, right): self.left=left; self.right=right
+    def __repr__(self): return f"({self.left} & {self.right})"
+
+class Or(Expr):
+    def __init__(self, left, right): self.left=left; self.right=right
+    def __repr__(self): return f"({self.left} | {self.right})"
+
+class Implies(Expr):
+    def __init__(self,a,b): self.a=a; self.b=b
+    def __repr__(self): return f"({self.a} -> {self.b})"
+
+class Iff(Expr):
+    def __init__(self,a,b): self.a=a; self.b=b
+    def __repr__(self): return f"({self.a} <-> {self.b})"
+
+class ForAll(Expr):
+    def __init__(self,var,body): self.var=var; self.body=body
+    def __repr__(self): return f"forall {self.var}.({self.body})"
+
+class Exists(Expr):
+    def __init__(self,var,body): self.var=var; self.body=body
+    def __repr__(self): return f"exists {self.var}.({self.body})"
+
+# === Tokenizer ===
+token_spec = [
+    ('SKIP', r'[ \t\n]+'),
+    ('LPAREN', r'\('),
+    ('RPAREN', r'\)'),
+    ('COMMA', r','),
+    ('DOT', r'\.'),
+    ('FORALL', r'forall\b'),
+    ('EXISTS', r'exists\b'),
+    ('IFF', r'<->'),
+    ('IMPL', r'->'),
+    ('AND', r'(&|and\b)'),
+    ('OR', r'(\||or\b)'),
+    ('NOT', r'(~|not\b)'),
+    ('NAME', r'[A-Za-z_]\w*'),
+    ('OTHER', r'.'),
+]
+token_re = re.compile('|'.join('(?P<%s>%s)' % pair for pair in token_spec), re.IGNORECASE)
+
+def tokenize(s):
+    for mo in token_re.finditer(s):
+        kind = mo.lastgroup
+        val = mo.group()
+        if kind == 'SKIP': continue
+        yield (kind, val)
+
+# === Parser: recursive descent ===
+class Parser:
+    def __init__(self, tokens):
+        self.toks = list(tokens)
+        self.i = 0
+    def peek(self):
+        if self.i < len(self.toks): return self.toks[self.i]
+        return (None, None)
+    def next(self):
+        t = self.peek(); self.i += 1; return t
+    def accept(self, *kinds):
+        if self.peek()[0] in kinds:
+            return self.next()
+        return None
+
+    def parse(self):
+        expr = self.parse_iff()
+        return expr
+
+    def parse_iff(self):
+        left = self.parse_impl()
+        while self.accept('IFF'):
+            right = self.parse_impl()
+            left = Iff(left, right)
+        return left
+
+    def parse_impl(self):
+        left = self.parse_or()
+        while self.accept('IMPL'):
+            right = self.parse_or()
+            left = Implies(left, right)
+        return left
+
+    def parse_or(self):
+        left = self.parse_and()
+        while self.accept('OR'):
+            right = self.parse_and()
+            left = Or(left, right)
+        return left
+
+    def parse_and(self):
+        left = self.parse_not()
+        while self.accept('AND'):
+            right = self.parse_not()
+            left = And(left, right)
+        return left
+
+    def parse_not(self):
+        if self.accept('NOT'):
+            node = self.parse_not()
+            return Not(node)
+        # quantifiers
+        if self.accept('FORALL'):
+            tok = self.accept('NAME')
+            if not tok: raise SyntaxError("Expected variable after forall")
+            var = tok[1]
+            # optional dot
+            self.accept('DOT')
+            body = self.parse_not()
+            return ForAll(var, body)
+        if self.accept('EXISTS'):
+            tok = self.accept('NAME')
+            if not tok: raise SyntaxError("Expected variable after exists")
+            var = tok[1]
+            self.accept('DOT')
+            body = self.parse_not()
+            return Exists(var, body)
+        return self.parse_atom()
+
+    def parse_atom(self):
+        tok = self.peek()
+        if tok[0] == 'LPAREN':
+            self.next()
+            e = self.parse_iff()
+            if not self.accept('RPAREN'): raise SyntaxError("Missing )")
+            return e
+        if tok[0] == 'NAME':
+            name = self.next()[1]
+            # predicate or constant/variable/function
+            if self.accept('LPAREN'):
+                args = []
+                if self.peek()[0] != 'RPAREN':
+                    while True:
+                        arg = self.parse_iff()
+                        args.append(arg)
+                        if self.accept('COMMA'):
+                            continue
+                        break
+                if not self.accept('RPAREN'): raise SyntaxError("Missing ) after args")
+                # Distinguish predicate/function by capitalization? We'll keep name as predicate
+                return Pred(name, args)
+            else:
+                # name alone is either Var or Const: by convention lowercase variables, uppercase constants?
+                # We'll treat single-letter lowercase as Var; otherwise Const if capitalized or multi-name
+                if re.match(r'^[a-z]$', name):
+                    return Var(name)
+                # detect typical variable style like x,y or multi-letter lowercase -> var
+                if name.islower():
+                    return Var(name)
+                return Const(name)
+        raise SyntaxError(f"Unexpected token: {tok}")
+
+# === Transformations ===
+
+counter = itertools.count()
+
+def eliminate_iff(expr):
+    if isinstance(expr, Iff):
+        a = eliminate_iff(expr.a); b = eliminate_iff(expr.b)
+        # (A <-> B) becomes (A -> B) & (B -> A)
+        return And(Implies(a,b), Implies(b,a))
+    if isinstance(expr, Implies):
+        return Implies(eliminate_iff(expr.a), eliminate_iff(expr.b))
+    if isinstance(expr, And):
+        return And(eliminate_iff(expr.left), eliminate_iff(expr.right))
+    if isinstance(expr, Or):
+        return Or(eliminate_iff(expr.left), eliminate_iff(expr.right))
+    if isinstance(expr, Not):
+        return Not(eliminate_iff(expr.p))
+    if isinstance(expr, ForAll):
+        return ForAll(expr.var, eliminate_iff(expr.body))
+    if isinstance(expr, Exists):
+        return Exists(expr.var, eliminate_iff(expr.body))
+    return expr
+
+def eliminate_imp(expr):
+    if isinstance(expr, Implies):
+        a = eliminate_imp(expr.a); b = eliminate_imp(expr.b)
+        return Or(Not(a), b)
+    if isinstance(expr, And):
+        return And(eliminate_imp(expr.left), eliminate_imp(expr.right))
+    if isinstance(expr, Or):
+        return Or(eliminate_imp(expr.left), eliminate_imp(expr.right))
+    if isinstance(expr, Not):
+        return Not(eliminate_imp(expr.p))
+    if isinstance(expr, ForAll):
+        return ForAll(expr.var, eliminate_imp(expr.body))
+    if isinstance(expr, Exists):
+        return Exists(expr.var, eliminate_imp(expr.body))
+    return expr
+
+def move_not_inward(expr):
+    if isinstance(expr, Not):
+        p = expr.p
+        if isinstance(p, Not):
+            return move_not_inward(p.p)
+        if isinstance(p, And):
+            return Or(move_not_inward(Not(p.left)), move_not_inward(Not(p.right)))
+        if isinstance(p, Or):
+            return And(move_not_inward(Not(p.left)), move_not_inward(Not(p.right)))
+        if isinstance(p, ForAll):
+            return Exists(p.var, move_not_inward(Not(p.body)))
+        if isinstance(p, Exists):
+            return ForAll(p.var, move_not_inward(Not(p.body)))
+        # predicate or atomic
+        return Not(move_not_inward(p))
+    if isinstance(expr, And):
+        return And(move_not_inward(expr.left), move_not_inward(expr.right))
+    if isinstance(expr, Or):
+        return Or(move_not_inward(expr.left), move_not_inward(expr.right))
+    if isinstance(expr, ForAll):
+        return ForAll(expr.var, move_not_inward(expr.body))
+    if isinstance(expr, Exists):
+        return Exists(expr.var, move_not_inward(expr.body))
+    return expr
+
+def standardize_vars(expr, mapping=None):
+    if mapping is None: mapping = {}
+    if isinstance(expr, ForAll) or isinstance(expr, Exists):
+        newvar = f"{expr.var}_{next(counter)}"
+        mapping2 = mapping.copy()
+        mapping2[expr.var] = newvar
+        body = standardize_vars(expr.body, mapping2)
+        if isinstance(expr, ForAll):
+            return ForAll(newvar, body)
+        else:
+            return Exists(newvar, body)
+    if isinstance(expr, Pred):
+        args = []
+        for a in expr.args:
+            args.append(standardize_vars(a, mapping))
+        return Pred(expr.name, args)
+    if isinstance(expr, Func):
+        return Func(expr.name, [standardize_vars(a,mapping) for a in expr.args])
+    if isinstance(expr, Var):
+        return Var(mapping.get(expr.name, expr.name))
+    if isinstance(expr, Const):
+        return expr
+    if isinstance(expr, Not):
+        return Not(standardize_vars(expr.p, mapping))
+    if isinstance(expr, And):
+        return And(standardize_vars(expr.left, mapping), standardize_vars(expr.right, mapping))
+    if isinstance(expr, Or):
+        return Or(standardize_vars(expr.left, mapping), standardize_vars(expr.right, mapping))
+    return expr
+
+# skolemization helpers
+skolem_count = itertools.count()
+
+def free_vars(expr, bound=None):
+    if bound is None: bound=set()
+    if isinstance(expr, Var):
+        return set([expr.name]) if expr.name not in bound else set()
+    if isinstance(expr, Const):
+        return set()
+    if isinstance(expr, Pred):
+        s=set()
+        for a in expr.args: s |= free_vars(a,bound)
+        return s
+    if isinstance(expr, Func):
+        s=set()
+        for a in expr.args: s |= free_vars(a,bound)
+        return s
+    if isinstance(expr, Not):
+        return free_vars(expr.p,bound)
+    if isinstance(expr, And) or isinstance(expr, Or) or isinstance(expr, Implies) or isinstance(expr, Iff):
+        l = free_vars(expr.left if hasattr(expr,'left') else expr.a, bound)
+        r = free_vars(expr.right if hasattr(expr,'right') else expr.b, bound)
+        return l|r
+    if isinstance(expr, ForAll) or isinstance(expr, Exists):
+        newbound = bound | {expr.var}
+        return free_vars(expr.body, newbound)
+    return set()
+
+def replace_var(expr, varname, term):
+    if isinstance(expr, Var):
+        if expr.name == varname:
+            return copy.deepcopy(term)
+        else:
+            return Var(expr.name)
+    if isinstance(expr, Pred):
+        return Pred(expr.name, [replace_var(a,varname,term) for a in expr.args])
+    if isinstance(expr, Func):
+        return Func(expr.name, [replace_var(a,varname,term) for a in expr.args])
+    if isinstance(expr, Not):
+        return Not(replace_var(expr.p,varname,term))
+    if isinstance(expr, And):
+        return And(replace_var(expr.left,varname,term), replace_var(expr.right,varname,term))
+    if isinstance(expr, Or):
+        return Or(replace_var(expr.left,varname,term), replace_var(expr.right,varname,term))
+    if isinstance(expr, ForAll):
+        if expr.var == varname: return ForAll(expr.var, expr.body)  # shadowed
+        return ForAll(expr.var, replace_var(expr.body,varname,term))
+    if isinstance(expr, Exists):
+        if expr.var == varname: return Exists(expr.var, expr.body)
+        return Exists(expr.var, replace_var(expr.body,varname,term))
+    return expr
+
+def skolemize(expr, bound_univ=None):
+    if bound_univ is None: bound_univ = []
+    if isinstance(expr, ForAll):
+        return ForAll(expr.var, skolemize(expr.body, bound_univ + [expr.var]))
+    if isinstance(expr, Exists):
+        # replace existential variable with Skolem function/constant depending on bound_univ
+        skname = f"SK{next(skolem_count)}"
+        if bound_univ:
+            # function of the bound universals
+            args = [Var(v) for v in bound_univ]
+            replacement = Func(skname, args)
+        else:
+            replacement = Const(skname)
+        body_replaced = replace_var(expr.body, expr.var, replacement)
+        return skolemize(body_replaced, bound_univ)
+    if isinstance(expr, Pred):
+        return Pred(expr.name, [skolemize(a, bound_univ) for a in expr.args])
+    if isinstance(expr, Func):
+        return Func(expr.name, [skolemize(a,bound_univ) for a in expr.args])
+    if isinstance(expr, Not):
+        return Not(skolemize(expr.p, bound_univ))
+    if isinstance(expr, And):
+        return And(skolemize(expr.left, bound_univ), skolemize(expr.right, bound_univ))
+    if isinstance(expr, Or):
+        return Or(skolemize(expr.left, bound_univ), skolemize(expr.right, bound_univ))
+    return expr
+
+def drop_universal(expr):
+    if isinstance(expr, ForAll):
+        return drop_universal(expr.body)
+    if isinstance(expr, And):
+        return And(drop_universal(expr.left), drop_universal(expr.right))
+    if isinstance(expr, Or):
+        return Or(drop_universal(expr.left), drop_universal(expr.right))
+    if isinstance(expr, Not):
+        return Not(drop_universal(expr.p))
+    return expr
+
+# distribute OR over AND
+def distribute_or_over_and(expr):
+    if isinstance(expr, Or):
+        A = distribute_or_over_and(expr.left)
+        B = distribute_or_over_and(expr.right)
+        # (A or (B and C)) => (A or B) and (A or C)
+        if isinstance(A, And):
+            return And(distribute_or_over_and(Or(A.left, B)), distribute_or_over_and(Or(A.right, B)))
+        if isinstance(B, And):
+            return And(distribute_or_over_and(Or(A, B.left)), distribute_or_over_and(Or(A, B.right)))
+        return Or(A,B)
+    if isinstance(expr, And):
+        return And(distribute_or_over_and(expr.left), distribute_or_over_and(expr.right))
+    if isinstance(expr, Not):
+        return Not(distribute_or_over_and(expr.p))
+    return expr
+
+# flatten AND/OR and extract clauses
+def flatten_and(expr):
+    if isinstance(expr, And):
+        return flatten_and(expr.left) + flatten_and(expr.right)
+    return [expr]
+
+def flatten_or(expr):
+    if isinstance(expr, Or):
+        return flatten_or(expr.left) + flatten_or(expr.right)
+    return [expr]
+
+def literal_to_string(lit):
+    if isinstance(lit, Not):
+        return f"~{lit.p}"
+    return str(lit)
+
+def extract_clauses(expr):
+    expr = distribute_or_over_and(expr)
+    conjuncts = flatten_and(expr)
+    clauses = []
+    for c in conjuncts:
+        disjuncts = flatten_or(c)
+        clause = [literal_to_string(d) for d in disjuncts]
+        clauses.append(clause)
+    return clauses
+
+# === pipeline function ===
+def fol_to_cnf_str(s):
+    toks = tokenize(s)
+    p = Parser(toks)
+    parsed = p.parse()
+    # stepwise
+    step1 = eliminate_iff(parsed)
+    step2 = eliminate_imp(step1)
+    step3 = move_not_inward(step2)
+    step4 = standardize_vars(step3)
+    step5 = skolemize(step4)
+    step6 = drop_universal(step5)
+    step7 = distribute_or_over_and(step6)
+    clauses = extract_clauses(step7)
+    return {
+        'parsed': parsed,
+        'no_iff': step1,
+        'no_imp': step2,
+        'nnf': step3,
+        'standardized': step4,
+        'skolemized': step5,
+        'without_univ': step6,
+        'cnf_expr': step7,
+        'clauses': clauses
+    }
+
+# === CLI ===
+def main():
+    print("Enter FOL sentences one per line (empty line to finish):")
+    lines=[]
+    while True:
+        try:
+            s = input().strip()
+        except EOFError:
+            break
+        if s == "": break
+        lines.append(s)
+
+    for i,s in enumerate(lines):
+        try:
+            result = fol_to_cnf_str(s)
+        except Exception as e:
+            print("Parsing/processing failed:", e)
+            continue
+        print("\nCNF expression:", result['cnf_expr'])
+
+if __name__ == '__main__':
+    main()
