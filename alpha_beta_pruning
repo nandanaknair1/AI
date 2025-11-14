@@ -1,0 +1,68 @@
+def alpha_beta(node, depth, alpha, beta, isMax, tree):
+    # Leaf node case
+    if depth == 0 or node not in tree:
+        return node  # leaf value is the node itself
+
+    if isMax:
+        best = float('-inf')
+        print(f"\nMAX node {node} | alpha={alpha}, beta={beta}")
+
+        for child in tree[node]:
+            val = alpha_beta(child, depth - 1, alpha, beta, False, tree)
+            best = max(best, val)
+            alpha = max(alpha, best)
+
+            print(f"  MAX → child {child} gives {val}, new alpha={alpha}")
+
+            if alpha >= beta:
+                print(f"  **PRUNED at MAX node {node}: alpha={alpha} >= beta={beta}**")
+                break
+        return best
+
+    else:
+        best = float('inf')
+        print(f"\nMIN node {node} | alpha={alpha}, beta={beta}")
+
+        for child in tree[node]:
+            val = alpha_beta(child, depth - 1, alpha, beta, True, tree)
+            best = min(best, val)
+            beta = min(beta, best)
+
+            print(f"  MIN → child {child} gives {val}, new beta={beta}")
+
+            if beta <= alpha:
+                print(f"  **PRUNED at MIN node {node}: beta={beta} <= alpha={alpha}**")
+                break
+        return best
+
+
+# ------------------------------
+# USER INPUT SECTION
+# ------------------------------
+tree = {}
+
+print("Enter number of internal nodes: ")
+n = int(input())
+
+print("\nEnter children for each node.")
+print("Format: parent child1 child2 ...")
+print("Enter leaf values as plain numbers.")
+
+for _ in range(n):
+    parts = input().split()
+    parent = parts[0]
+    children = []
+    for c in parts[1:]:
+        try:
+            children.append(int(c))   # leaf value
+        except:
+            children.append(c)       # internal node
+    tree[parent] = children
+
+root = input("\nEnter root node: ")
+depth = int(input("Enter depth of tree: "))
+
+print("\n=== Running Alpha-Beta Pruning ===")
+value = alpha_beta(root, depth, float('-inf'), float('inf'), True, tree)
+
+print("\nFinal minimax value =", value)
